@@ -1,12 +1,20 @@
 package luciObjViewer;
 
+import java.awt.Color;
+import java.awt.Graphics2D;
+import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.EnumSet;
 import java.util.List;
+
+import javax.imageio.ImageIO;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -16,13 +24,22 @@ import com.esotericsoftware.minlog.Log;
 import ch.fhnw.ether.controller.DefaultController;
 import ch.fhnw.ether.controller.IController;
 import ch.fhnw.ether.formats.obj.ObjReader;
+import ch.fhnw.ether.image.IGPUImage;
 import ch.fhnw.ether.platform.Platform;
 import ch.fhnw.ether.render.IRenderManager;
 import ch.fhnw.ether.scene.camera.ICamera;
 import ch.fhnw.ether.scene.light.DirectionalLight;
+import ch.fhnw.ether.scene.mesh.DefaultMesh;
 import ch.fhnw.ether.scene.mesh.IMesh;
 import ch.fhnw.ether.scene.mesh.MeshUtilities;
+import ch.fhnw.ether.scene.mesh.IMesh.Flag;
+import ch.fhnw.ether.scene.mesh.IMesh.Primitive;
+import ch.fhnw.ether.scene.mesh.IMesh.Queue;
+import ch.fhnw.ether.scene.mesh.geometry.DefaultGeometry;
+import ch.fhnw.ether.scene.mesh.geometry.IGeometry;
+import ch.fhnw.ether.scene.mesh.material.ColorMapMaterial;
 import ch.fhnw.ether.scene.mesh.material.ColorMaterial;
+import ch.fhnw.ether.scene.mesh.material.IMaterial;
 import ch.fhnw.ether.view.DefaultView;
 import ch.fhnw.ether.view.IView;
 import ch.fhnw.ether.view.IView.Config;
@@ -70,6 +87,9 @@ public class LuciObjViewer extends LcRemoteService {
 	IController controller;
 	RemoteViewerArgsProcessor ap;
 	int ScID, cameraID, w = 800, h = 600, x = 100, y = 100;
+	private ICamera cam = null;
+	
+	private int t_height, t_width;
 	
 	public LuciObjViewer(RemoteViewerArgsProcessor ap) {
 		super(ap);
@@ -150,6 +170,7 @@ public class LuciObjViewer extends LcRemoteService {
                 cameraID = H.getInt("cameraID");
                 send(new Message(new JSONObject("{'run':'scenario.camera.Get', 'cameraID':" + cameraID + "}")));
                 send(new Message(new JSONObject("{'run':'scenario.camera.SubscribeTo', 'cameraID':" + cameraID + "}")));
+                
             }
             return new Message(new JSONObject("{'result':{'status':'started'}}"));
 		}
@@ -161,9 +182,15 @@ public class LuciObjViewer extends LcRemoteService {
 			String serviceName = h.getString("serviceName");
 			switch(serviceName){
 			case "DistanceToWalls": 
-				visualizeDistanceToWalls(); 
+				visualizeDistanceToWalls(m); 
 				break;
-			case "scenario.obj.Get": 
+			case "scenario.obj.Get":
+				JSONObject r = h.getJSONObject("result");
+				if(r.has("deletedIDs")) {
+					int ScID = r.getInt("ScID");
+					JSONArray deletedIDs = r.getJSONArray("deletedIDs");
+					controller.run(time -> deletedIDs.forEach(deletedID -> scene.remove3DObject(ScID, (int)deletedID)));
+				}
 				receiveObj(m); 
 				break;
 			case "scenario.camera.Get":
@@ -203,25 +230,31 @@ public class LuciObjViewer extends LcRemoteService {
 //				File f = new File("/Users/treyerl/Desktop/ZH_ESUM.obj");
 				int ScID = m.getHeader().getJSONObject("result").getInt("ScID");
 				ObjReader obj = new ObjReader(f);
-				obj.getMeshes(null, groupName -> ScID+"/"+groupName)
-				   .forEach(mesh -> scene.add3DObject(mesh));
+				obj.getMeshes(null, groupName -> ScID+"/"+groupName, Queue.DEPTH, EnumSet.of(Flag.DONT_CULL_FACE))
+				   .forEach(mesh -> scene.update3DObject(mesh));
 				f.delete();
 				runIfExists("DistanceToWalls", requestDTW(obj.getObject().getBounds()));
 			} catch (IOException e){
 				e.printStackTrace();
 			}
+			IRenderManager rm = controller.getRenderManager();
+			if (cam == null){
+				IView view = controller.getCurrentView();
+				if (view != null){
+					cam = rm.getCamera(view);
+				}
+			}
 		});
 	}
 	
 	private void receiveCamera(JSONObject result){
+    	System.out.println("new camera");
 		controller.run(time -> {
 			JSONObject eye = result.getJSONObject("location");
 			JSONObject at = result.getJSONObject("lookAt");
 			JSONObject up = result.getJSONObject("cameraUp");
-			IRenderManager rm = controller.getRenderManager();
-			IView view = controller.getCurrentView();
-			if (view != null){
-				ICamera cam = rm.getCamera(view);
+			if (cam != null){
+		    	System.out.println("new camera2");
 				cam.setPosition(new Vec3(eye.getDouble("x"), eye.getDouble("y"), eye.getDouble("z")));
 				cam.setTarget(new Vec3(at.getDouble("x"), at.getDouble("y"), at.getDouble("z")));
 				cam.setUp(new Vec3(up.getDouble("x"), up.getDouble("y"), up.getDouble("z")));
@@ -231,14 +264,83 @@ public class LuciObjViewer extends LcRemoteService {
 		});
 	}
 	
-	private void visualizeDistanceToWalls(){
+	private void visualizeDistanceToWalls(Message m){
+        BufferedImage img = new BufferedImage(t_width, t_height, BufferedImage.TYPE_INT_RGB);
+        Graphics2D graphics = img.createGraphics();
+
+        Attachment att = m.getAttachmentsSortedByPosition()[0];
+        try {
+            InputStream is = Attachment.getInputStream(att);
+//            ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+            int nRead;
+            byte[] data = new byte[4];
+
+            ArrayList<Float> floats = new ArrayList<Float>();
+            float max_dist = Float.MIN_VALUE;
+            float min_dist = Float.MAX_VALUE;
+
+            while ((nRead = is.read(data, 0, data.length)) != -1) {
+                float f =  ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN).getFloat();
+                floats.add(f);
+
+                System.out.println(f);
+
+                if(max_dist < f) max_dist = f;
+                if(min_dist > f) min_dist = f;
+            }
+
+
+            for(int i = 0; i < t_height; i++) {
+                for(int j = 0; j < t_width; j++) {
+                    int index = i*t_width + j;
+                    float dist = floats.get(index);
+                    System.out.println("index: " + index);
+                    float scaled = (dist - min_dist)*(1/(max_dist - min_dist));
+                    if (scaled <= 0.5) {
+                        graphics.setColor(new Color(0, 2f*scaled, 1 - 2f*scaled, 1.0f));
+                    } else {
+                        graphics.setColor(new Color(2f*(scaled - 0.5f), 1 - 2f*(scaled - 0.5f), 0, 1.0f));
+                    }
+                    System.out.println("value: " + dist);
+                    System.out.println("x: " + j);
+                    System.out.println("y: " + i);
+
+                    graphics.fillRect(j, t_height - i - 1, 1, 1);
+                }
+            }
+
+            System.out.println("write texture.png");
+            File outputfile = new File("texture.png");
+            ImageIO.write(img, "png", outputfile);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        
+        float[] vertices = { 0, 0, 0, 5f, 0, 5f, 0, 0, 5f };
+		float[] colors = { 1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 1, 1 };
+		float[] texCoords = { 10, 0, 10, 10, 0, 10 };
 		
+		try {
+			File inputfile = new File("texture.png");
+			IGPUImage t = IGPUImage.read(inputfile);
+			IMaterial mat = new ColorMapMaterial(RGBA.WHITE, t, true);
+			IGeometry g = DefaultGeometry.createVCM(vertices, colors, texCoords);
+			IMesh texture_mesh = new DefaultMesh(Primitive.TRIANGLE_STRIP, mat, g);
+			//texture_mesh.setTransform(transform)
+			controller.run(time -> scene.update3DObject(texture_mesh));
+		} catch (Exception e) {
+			e.printStackTrace();
+			System.err.println("cant load image");
+			System.exit(1);
+		}
 	}
 	
 	private Runnable requestDTW(BoundingBox box){
 		return () -> {
             // creation of grid
             ByteArrayOutputStream byteStream = new ByteArrayOutputStream();
+            t_width = (int) (box.getMaxX() - box.getMinX());
+            t_height = (int) (box.getMaxY() - box.getMinY());
             for(float i = box.getMinY(); i <= box.getMaxY(); i+=1) {
                 for(float j = box.getMinX(); j <= box.getMaxY(); j+=1) {
                     byte[] bi = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putFloat(j).array();
@@ -262,3 +364,4 @@ public class LuciObjViewer extends LcRemoteService {
 		};
 	}
 }
+

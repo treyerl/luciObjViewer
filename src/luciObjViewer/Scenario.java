@@ -48,11 +48,36 @@ public class Scenario implements IScene {
 			rm.removeMesh((IMesh) object);
 		objects.remove(object.getName());
 	}
+	
+	public void remove3DObject(int ScID, int geomID) {
+		Collection<I3DObject> objects = get3DObjects();
+		objects.forEach(object -> {
+			if(object.getName().equals(ScID+"/"+geomID)){
+				remove3DObject(object);
+			}
+		});
+	}
 
 
 	@Override
 	public Collection<I3DObject> get3DObjects() {
 		return objects.values();
+	}
+	
+	public void update3DObject(I3DObject object) {
+		boolean existing = false;
+		Collection<I3DObject> objects = get3DObjects();
+		for(I3DObject object_cmp: objects) {
+			if(object_cmp.getName().equals(object.getName())) {
+				remove3DObject(object_cmp);
+				add3DObject(object);
+				existing = true;
+				break;
+			}
+		}
+		if(!existing) {
+			add3DObject(object);
+		}
 	}
 
 }
