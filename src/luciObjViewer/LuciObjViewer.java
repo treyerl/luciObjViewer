@@ -226,11 +226,6 @@ public class LuciObjViewer extends LcRemoteService {
 	}
 	
 	private void receiveObj(Message m){
-		JSONObject h = m.getHeader();
-		if (h.has("referenceID"))
-			System.out.println("receiving R-"+h.getLong("referenceID"));
-		if (h.has("callID"))
-			System.out.println("receiving C-"+h.getLong("callID"));
 		if (!receiving){
 			try {
 				final int ScID = m.getHeader().getJSONObject("result").getInt("ScID");
@@ -252,13 +247,13 @@ public class LuciObjViewer extends LcRemoteService {
 						send(new Message(new JSONObject("{'run':'scenario.camera.Get', 'cameraID':" + cameraID + "}")));
 					}
 					receiving = false;
-					System.out.println("received obj");
+//					System.out.println("received obj");
 				});
 			} catch (IOException e){
 				e.printStackTrace();
 			}
 			receiving = true;
-			System.out.println("receive obj");
+//			System.out.println("receive obj");
 		}
 		
 	}
