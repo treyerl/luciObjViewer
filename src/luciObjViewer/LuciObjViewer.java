@@ -244,7 +244,8 @@ public class LuciObjViewer extends LcRemoteService {
 							cam = rm.getCamera(view);
 							cam.setNear(5f);
 						}
-						send(new Message(new JSONObject("{'run':'scenario.camera.Get', 'cameraID':" + cameraID + "}")));
+						if (cameraID != 0)
+							send(new Message(new JSONObject("{'run':'scenario.camera.Get', 'cameraID':" + cameraID + "}")));
 					}
 					receiving = false;
 //					System.out.println("received obj");
